@@ -1,25 +1,27 @@
+---
 version: '3'
 
 volumes:
-    prometheus_data: {}
-    grafana_data: {}
+  prometheus1_data: {}
+  grafana_data: {}
+  minio_data: {}
 
 services:
-  prometheus2kafka:
-    image: "confluentinc/prometheus2kafka"
+  prometheus-2-kafka:
+    image: "nl5957/prometheus2kafka"
     build: 
       context: ./remote_write/
     ports:
       - "9201:9201"
   zookeeper:
-    image: "confluentinc/cp-zookeeper:5.5.3"
+    image: "confluentinc/cp-zookeeper:6.1.1"
     hostname: zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
 
   kafka-broker-1:
-    image: "confluentinc/cp-kafka:5.5.3"
+    image: "confluentinc/cp-kafka:6.1.1"
     hostname: kafka-broker-1
     depends_on:
       - zookeeper
@@ -35,35 +37,135 @@ services:
       KAFKA_DEFAULT_REPLICATION_FACTOR: 1
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       CONFLUENT_METRICS_ENABLE: 'false'
-
-  kafdrop:
-    image: obsidiandynamics/kafdrop
+  minio-1:
+    image: minio/minio:RELEASE.2021-04-22T15-44-28Z
+    volumes:
+      - minio_data:/data/
     ports:
       - "9000:9000"
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio123
+    command: server /data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+  kafdrop:
+    image: obsidiandynamics/kafdrop:3.27.0
+    ports:
+      - "8001:9000"
     environment:
       KAFKA_BROKERCONNECT: "kafka-broker-1:9092"
       JVM_OPTS: "-Xms32M -Xmx464"
     depends_on:
       - "kafka-broker-1"
 
-  prometheus:
-    image: prom/prometheus
-    hostname: prometheus
+  prometheus-1:
+    image: prom/prometheus:v2.26.0
+    hostname: prometheus-1
     volumes:
       - ./prometheus/:/etc/prometheus/
-      - prometheus_data:/prometheus
+      - prometheus1_data:/prometheus:rw
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
       - '--web.console.libraries=/usr/share/prometheus/console_libraries'
       - '--web.console.templates=/usr/share/prometheus/consoles'
       - '--web.enable-lifecycle'
+      - '--storage.tsdb.min-block-duration=2h'
+      - '--storage.tsdb.max-block-duration=2h'
     ports:
       - 9090:9090
     restart: always
+  thanos-sidecar-1:
+    image: quay.io/thanos/thanos:v0.20.1
+    volumes:
+      - ./thanos/:/etc/thanos/
+      - prometheus1_data:/prometheus:ro
+    command:
+        - 'sidecar'
+        - '--tsdb.path=/prometheus'
+        - '--prometheus.url=http://prometheus-1:9090'
+        - '--grpc-address=0.0.0.0:10091'
+        - '--http-address=0.0.0.0:10902'
+        - '--objstore.config-file=/etc/thanos/bucket_config.yaml'
+    depends_on:
+        - prometheus-1
+        - minio-1
+    restart: always
+
+  thanos-querier:
+    image: quay.io/thanos/thanos:v0.20.1
+    command:
+      - 'query'
+      - '--grpc-address=0.0.0.0:10091'
+      - '--http-address=0.0.0.0:10902'
+      - '--query.replica-label=replica'
+      - '--store=thanos-sidecar-1:10091'
+      - '--store=thanos-store-gateway:10091'
+    ports:
+      - 10902:10902
+    depends_on:
+      - thanos-sidecar-1
+      - thanos-store-gateway
+    restart: always
+
+  thanos-store-gateway:
+    image: quay.io/thanos/thanos:v0.20.1
+    volumes:
+      - ./thanos/:/etc/thanos/
+    command:
+      - 'store'
+      - '--grpc-address=0.0.0.0:10091'
+      - '--http-address=0.0.0.0:10902'
+      - '--data-dir=/tmp/thanos/store'
+      - '--objstore.config-file=/etc/thanos/bucket_config.yaml'
+    depends_on:
+      - minio-1
+    restart: always
+
+  thanos-compactor:
+    image: quay.io/thanos/thanos:v0.20.1
+    volumes:
+      - ./thanos/:/etc/thanos/
+    command:
+      - 'compact'
+      - '--log.level=debug'
+      - '--data-dir=/data'
+      - '--objstore.config-file=/etc/thanos/bucket_config.yaml'
+      - '--wait'
+    depends_on:
+      - minio-1
+    restart: always
+
+  thanos-ruler:
+    image: quay.io/thanos/thanos:v0.20.1
+    volumes:
+      - ./thanos/:/etc/thanos/
+    command:
+      - 'rule'
+      - '--grpc-address=0.0.0.0:10091'
+      - '--http-address=0.0.0.0:10902'
+      - '--log.level=debug'
+      - '--data-dir=/data'
+      - '--eval-interval=15s'
+      - '--rule-file=/etc/thanos/*.rules.yaml'
+      - '--alertmanagers.url=http://alertmanager:9093'
+      - '--query=thanos-querier:10902'
+      - '--objstore.config-file=/etc/thanos/bucket_config.yaml'
+      - "--label=ruler_cluster=\"vegas\""
+      - "--label=ruler_replica=\"r1\""
+    ports:
+      - 10903:10902
+    depends_on:
+      - minio-1
+      - thanos-querier
+    restart: always
 
   node-exporter:
-    image: prom/node-exporter
+    image: prom/node-exporter:v1.1.2
     hostname: node-exporter
     volumes:
       - /proc:/host/proc:ro
@@ -80,12 +182,13 @@ services:
     restart: always
 
   grafana:
-    image: grafana/grafana
+    image: grafana/grafana:7.5.5-ubuntu
     hostname: grafana
     depends_on:
-      - prometheus
+      - prometheus-1
     ports:
       - 3000:3000
     volumes:
       - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning/:/etc/grafana/provisioning/
     restart: always
