@@ -1,8 +1,8 @@
 type: S3
 config:
   bucket: "thanos"
-  endpoint: "minio1:9000"
+  endpoint: "minio-1:9000"
   insecure: true
   signature_version2: true
-  access_key: $S3_ACCESS_KEY
-  secret_key: $S3_SECRET_KEY
+  access_key: minio
+  secret_key: minio123

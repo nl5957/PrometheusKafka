@@ -81,9 +81,11 @@ services:
     restart: always
   thanos-sidecar-1:
     image: quay.io/thanos/thanos:v0.20.1
+    ports:
+      - 10904:10902
     volumes:
       - ./thanos/:/etc/thanos/
-      - prometheus1_data:/prometheus:ro
+      - prometheus1_data:/prometheus
     command:
         - 'sidecar'
         - '--tsdb.path=/prometheus'
@@ -114,6 +116,8 @@ services:
 
   thanos-store-gateway:
     image: quay.io/thanos/thanos:v0.20.1
+    ports:
+      - 10905:10902
     volumes:
       - ./thanos/:/etc/thanos/
     command:
