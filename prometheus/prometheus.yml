@@ -1,0 +1,24 @@
+global:
+  scrape_interval:     15s 
+  evaluation_interval: 15s 
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+  - static_configs:
+    - targets:
+      # - alertmanager:9093
+
+rule_files:
+  # - "first_rules.yml"
+  # - "second_rules.yml"
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+    - targets: ['node-exporter:9100']
+
+remote_write:
+  - url: "http://prometheus2kafka:9201/write"
+    #remote_read:
+    #  - url: "http://prometheus2kafka:9201/read"
